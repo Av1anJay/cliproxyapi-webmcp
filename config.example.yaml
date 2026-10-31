@@ -1,0 +1,46 @@
+# WebMCP plugin configuration for CLIProxyAPI.
+#
+# The plugin id is the .so file name: drop webmcp.so into plugins.dir and the
+# config key below is "webmcp".
+plugins:
+  enabled: true
+  dir: "./plugins"
+  configs:
+    webmcp:
+      # Host-side gate AND in-plugin switch: the host refuses to load the .so
+      # when this is false; if it is flipped at runtime the plugin also answers
+      # every tool call with a clear "disabled" tool error instead of doing work.
+      enabled: true
+      priority: 10
+
+      # Loopback base URL of THIS CPA instance. The plugin calls
+      # /v8/management/oauth/* on it, so it must be the port CPA listens on.
+      management_base_url: "http://127.0.0.1:8317"
+
+      # Optional. When empty, the credential the MCP client sent
+      # (X-Management-Key or Authorization: Bearer) is forwarded instead.
+      management_key: ""
+
+      # Per-call timeout for loopback management requests (1-120).
+      timeout_seconds: 20
+
+      # Provider used when a tool call omits one.
+      default_provider: "codex"
+
+      # Let oauth_login_submit accept a pasted full redirect URL.
+      allow_callback_url: true
+
+      # Upper bound for one oauth_login_wait long poll (1-900).
+      max_wait_seconds: 300
+
+      # Advertised provider list. These are the names a live 8.0.46 host
+      # accepts at GET /v8/management/oauth/auth-url.
+      providers:
+        - claude
+        - codex
+        - antigravity
+        - kimi
+        - kimi-ai
+        - xai
+        - devin
+        - meta

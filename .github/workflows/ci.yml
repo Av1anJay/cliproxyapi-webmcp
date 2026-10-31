@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: CGO_ENABLED=1 go vet ./...
+
+      - name: go test -race
+        run: CGO_ENABLED=1 go test -race -count=1 ./...
+
+      - name: build linux
+        run: make linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webmcp-linux-amd64
+          path: bin/webmcp.so
+          if-no-files-found: error
+
+  build-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: install cross compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: build linux arm64
+        run: |
+          mkdir -p bin
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+            go build -trimpath -buildmode=c-shared -o bin/webmcp.so .
+          rm -f bin/webmcp.h
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webmcp-linux-arm64
+          path: bin/webmcp.so
+          if-no-files-found: error
