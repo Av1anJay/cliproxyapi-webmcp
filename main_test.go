@@ -19,7 +19,40 @@ type fakeCPA struct {
 	server    *httptest.Server
 	requests  []recordedRequest
 	statusSeq []string
+	files     []map[string]any
 	calls     atomic.Int64
+}
+
+// defaultFakeFiles mirrors the real /v8/management/credentials payload shape,
+// including the id_token-nested plan type, cooldowns and codex SIWC fields.
+var defaultFakeFiles = []map[string]any{
+	{
+		"name":                "codex-a@b.com-plus.json",
+		"provider":            "codex",
+		"type":                "codex",
+		"status":              "active",
+		"email":               "acct@example.com",
+		"account":             "acct@example.com",
+		"account_type":        "oauth",
+		"priority":            7,
+		"success":             12,
+		"failed":              1,
+		"id_token":            map[string]any{"plan_type": "plus"},
+		"siwc_bind_supported": true,
+		"siwc_bound":          false,
+		"siwc_status":         "off",
+		"use_siwc":            false,
+		"cooldowns": []any{
+			map[string]any{"scope": "model", "model_key": "gpt-5", "reason": "rate_limit", "remaining_seconds": 42},
+		},
+	},
+	{
+		"name":     "xai-b.json",
+		"provider": "xai",
+		"type":     "xai",
+		"status":   "disabled",
+		"disabled": true,
+	},
 }
 
 type recordedRequest struct {
@@ -78,7 +111,11 @@ func newFakeCPA(t *testing.T) *fakeCPA {
 	})
 	mux.HandleFunc("/v8/management/credentials", func(w http.ResponseWriter, r *http.Request) {
 		fake.record(r)
-		_, _ = w.Write([]byte(`{"files":[{"name":"codex-a@b.com-plus.json","provider":"codex","status":"active","plan_type":"plus"},{"name":"xai-b.json","provider":"xai","disabled":true}]}`))
+		files := fake.files
+		if files == nil {
+			files = defaultFakeFiles
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": files})
 	})
 	fake.server = httptest.NewServer(mux)
 	t.Cleanup(fake.server.Close)
@@ -284,17 +321,117 @@ func TestToolSubmitRequiresStateAndCode(t *testing.T) {
 	}
 }
 
-func TestListCredentialsOmitsSecrets(t *testing.T) {
+func TestListAccountsProjectsHealthFields(t *testing.T) {
 	fake := newFakeCPA(t)
 	cfg := testConfig(t, fake.server.URL)
 	client := newCPAClient(cfg, "")
 
-	items, errList := client.credentialsList(context.Background())
+	items, errList := client.accountsList(context.Background(), accountFilter{IncludeDisabled: true})
 	if errList != nil {
-		t.Fatalf("credentialsList: %v", errList)
+		t.Fatalf("accountsList: %v", errList)
 	}
-	if len(items) != 2 || items[0].PlanType != "plus" || !items[1].Disabled {
-		t.Fatalf("unexpected credentials: %+v", items)
+	if len(items) != 2 {
+		t.Fatalf("got %d accounts, want 2", len(items))
+	}
+	codex := items[0]
+	if codex.Provider != "codex" || codex.Email != "acct@example.com" || codex.PlanType != "plus" {
+		t.Fatalf("codex projection wrong: %+v", codex)
+	}
+	if !codex.Usable || codex.Disabled {
+		t.Fatalf("codex should be usable: %+v", codex)
+	}
+	if codex.Priority == nil || *codex.Priority != 7 {
+		t.Fatalf("priority not projected: %+v", codex.Priority)
+	}
+	if len(codex.Cooldowns) != 1 || codex.Cooldowns[0].Scope != "model" || codex.Cooldowns[0].RemainingSeconds != 42 {
+		t.Fatalf("cooldowns not projected: %+v", codex.Cooldowns)
+	}
+	if codex.SIWC == nil || !codex.SIWC.Supported || codex.SIWC.Bound || codex.SIWC.Status != "off" {
+		t.Fatalf("siwc not projected: %+v", codex.SIWC)
+	}
+
+	xai := items[1]
+	if xai.Provider != "xai" || xai.Usable {
+		t.Fatalf("xai should be disabled/unusable: %+v", xai)
+	}
+	if xai.SIWC != nil {
+		t.Fatalf("non-codex accounts must not carry siwc state: %+v", xai.SIWC)
+	}
+}
+
+func TestListAccountsFilters(t *testing.T) {
+	fake := newFakeCPA(t)
+	cfg := testConfig(t, fake.server.URL)
+	client := newCPAClient(cfg, "")
+
+	byProvider, _ := client.accountsList(context.Background(), accountFilter{Provider: "xai", IncludeDisabled: true})
+	if len(byProvider) != 1 || byProvider[0].Provider != "xai" {
+		t.Fatalf("provider filter failed: %+v", byProvider)
+	}
+
+	noDisabled, _ := client.accountsList(context.Background(), accountFilter{IncludeDisabled: false})
+	if len(noDisabled) != 1 || noDisabled[0].Provider != "codex" {
+		t.Fatalf("include_disabled=false failed: %+v", noDisabled)
+	}
+
+	byStatus, _ := client.accountsList(context.Background(), accountFilter{Status: "disabled", IncludeDisabled: true})
+	if len(byStatus) != 1 || byStatus[0].Provider != "xai" {
+		t.Fatalf("status filter failed: %+v", byStatus)
+	}
+}
+
+func TestSummarizeAccounts(t *testing.T) {
+	totals := summarizeAccounts([]accountSummary{
+		{Provider: "codex", Status: "active", Usable: true},
+		{Provider: "codex", Status: "disabled", Disabled: true},
+		{Provider: "xai", Status: "active", Unavailable: true},
+	})
+	if totals.Total != 3 || totals.Usable != 1 || totals.Disabled != 1 || totals.Unavailable != 1 {
+		t.Fatalf("bad totals: %+v", totals)
+	}
+	if totals.ByProvider["codex"] != 2 || totals.ByStatus["active"] != 2 {
+		t.Fatalf("bad group counts: %+v", totals)
+	}
+}
+
+func TestToolListAccountsReturnsTotals(t *testing.T) {
+	fake := newFakeCPA(t)
+	cfg := testConfig(t, fake.server.URL)
+	client := newCPAClient(cfg, "")
+
+	out, errRun := runTool(context.Background(), cfg, client, "list_accounts", map[string]any{})
+	if errRun != nil {
+		t.Fatalf("runTool: %v", errRun)
+	}
+	payload, _ := out.(map[string]any)
+	if payload["count"] != 2 {
+		t.Fatalf("count = %v, want 2", payload["count"])
+	}
+	totals, ok := payload["totals"].(accountTotals)
+	if !ok || totals.ByProvider["codex"] != 1 {
+		t.Fatalf("totals missing: %+v", payload["totals"])
+	}
+	if _, exists := payload["message"]; exists {
+		t.Fatalf("message must only appear for an empty result: %+v", payload)
+	}
+}
+
+func TestToolListAccountsEmptyIsNotAnError(t *testing.T) {
+	fake := newFakeCPA(t)
+	fake.files = []map[string]any{}
+	cfg := testConfig(t, fake.server.URL)
+	client := newCPAClient(cfg, "")
+
+	out, errRun := runTool(context.Background(), cfg, client, "list_accounts", map[string]any{})
+	if errRun != nil {
+		t.Fatalf("runTool: %v", errRun)
+	}
+	payload, _ := out.(map[string]any)
+	if payload["count"] != 0 {
+		t.Fatalf("count = %v, want 0", payload["count"])
+	}
+	if _, exists := payload["message"]; !exists {
+		t.Fatal("empty result should tell the agent how to add an account")
 	}
 }
 

@@ -339,12 +339,48 @@ func runTool(ctx context.Context, cfg pluginConfig, client *cpaClient, name stri
 			"note":             "Provider names accepted by GET /v8/management/oauth/auth-url on this host.",
 		}, nil
 
-	case "list_credentials":
-		items, errList := client.credentialsList(ctx)
+	case "list_accounts":
+		filter := accountFilter{
+			Provider:        strings.ToLower(strings.TrimSpace(stringArg(args, "provider"))),
+			Status:          strings.ToLower(strings.TrimSpace(stringArg(args, "status"))),
+			IncludeDisabled: boolArg(args, "include_disabled", true),
+		}
+		items, errList := client.accountsList(ctx, filter)
 		if errList != nil {
 			return nil, errList
 		}
-		return map[string]any{"count": len(items), "credentials": items}, nil
+		out := map[string]any{
+			"count":    len(items),
+			"totals":   summarizeAccounts(items),
+			"accounts": items,
+		}
+		if len(items) == 0 {
+			out["message"] = "No accounts match. Call oauth_login_start to add one."
+		}
+		return out, nil
+
+	case "list_credentials":
+		items, errList := client.accountsList(ctx, accountFilter{IncludeDisabled: true})
+		if errList != nil {
+			return nil, errList
+		}
+		// Backwards-compatible shape: the older tool only promised a flat list.
+		legacy := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			legacy = append(legacy, map[string]any{
+				"name":      item.Name,
+				"provider":  item.Provider,
+				"status":    item.Status,
+				"disabled":  item.Disabled,
+				"plan_type": item.PlanType,
+				"expired":   item.NextRetryAfter,
+			})
+		}
+		return map[string]any{
+			"count":       len(items),
+			"credentials": legacy,
+			"note":        "Deprecated: use list_accounts for health, cooldowns and totals.",
+		}, nil
 
 	case "cpa_status":
 		return map[string]any{
@@ -408,6 +444,29 @@ func intArg(args map[string]any, name string, fallback int) int {
 			return fallback
 		}
 		return parsed
+	default:
+		return fallback
+	}
+}
+
+func boolArg(args map[string]any, name string, fallback bool) bool {
+	value, ok := args[name]
+	if !ok || value == nil {
+		return fallback
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true", "yes", "1", "on":
+			return true
+		case "false", "no", "0", "off":
+			return false
+		}
+		return fallback
+	case float64:
+		return typed != 0
 	default:
 		return fallback
 	}

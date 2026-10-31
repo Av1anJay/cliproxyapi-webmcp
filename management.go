@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -204,20 +205,63 @@ func (c *cpaClient) oauthCancel(ctx context.Context, state string) (map[string]a
 	return out, nil
 }
 
-// credentialSummary is a deliberately narrow projection of
-// GET /v8/management/credentials: no tokens, no emails beyond what the host
-// already exposes in the file name.
-type credentialSummary struct {
-	Name     string `json:"name"`
-	Provider string `json:"provider,omitempty"`
-	Type     string `json:"type,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Disabled bool   `json:"disabled"`
-	PlanType string `json:"plan_type,omitempty"`
-	Expired  string `json:"expired,omitempty"`
+// accountCooldown is a local retry restriction the host reports per account.
+type accountCooldown struct {
+	Scope            string `json:"scope"`
+	ModelKey         string `json:"model_key,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	RetryAt          string `json:"retry_at,omitempty"`
+	RemainingSeconds int64  `json:"remaining_seconds,omitempty"`
 }
 
-func (c *cpaClient) credentialsList(ctx context.Context) ([]credentialSummary, error) {
+// accountSIWC is the Codex "sign in with ChatGPT" binding state, which decides
+// whether an account can serve requests through that path.
+type accountSIWC struct {
+	Supported bool   `json:"supported"`
+	Bound     bool   `json:"bound"`
+	Status    string `json:"status,omitempty"`
+	Use       bool   `json:"use,omitempty"`
+}
+
+// accountSummary is a deliberately narrow projection of
+// GET /v8/management/credentials. Tokens, id_token claims, file paths and
+// quota internals are dropped; what remains is what a human or agent needs to
+// decide which account to use or re-login.
+type accountSummary struct {
+	Name           string            `json:"name"`
+	Provider       string            `json:"provider,omitempty"`
+	Account        string            `json:"account,omitempty"`
+	Email          string            `json:"email,omitempty"`
+	AccountType    string            `json:"account_type,omitempty"`
+	PlanType       string            `json:"plan_type,omitempty"`
+	Label          string            `json:"label,omitempty"`
+	Status         string            `json:"status,omitempty"`
+	StatusMessage  string            `json:"status_message,omitempty"`
+	Disabled       bool              `json:"disabled"`
+	Unavailable    bool              `json:"unavailable"`
+	Usable         bool              `json:"usable"`
+	RuntimeOnly    bool              `json:"runtime_only,omitempty"`
+	Priority       *int              `json:"priority,omitempty"`
+	Note           string            `json:"note,omitempty"`
+	Success        int               `json:"success"`
+	Failed         int               `json:"failed"`
+	CreatedAt      string            `json:"created_at,omitempty"`
+	UpdatedAt      string            `json:"updated_at,omitempty"`
+	LastRefresh    string            `json:"last_refresh,omitempty"`
+	NextRetryAfter string            `json:"next_retry_after,omitempty"`
+	Cooldowns      []accountCooldown `json:"cooldowns,omitempty"`
+	SIWC           *accountSIWC      `json:"siwc,omitempty"`
+}
+
+// accountFilter narrows the host's credential list. The host only filters by
+// name and auth_index, so everything else is applied here.
+type accountFilter struct {
+	Provider        string
+	Status          string
+	IncludeDisabled bool
+}
+
+func (c *cpaClient) accountsList(ctx context.Context, filter accountFilter) ([]accountSummary, error) {
 	status, raw, errDo := c.do(ctx, http.MethodGet, "/v8/management/credentials", nil, nil)
 	if errDo != nil {
 		return nil, errDo
@@ -231,22 +275,130 @@ func (c *cpaClient) credentialsList(ctx context.Context) ([]credentialSummary, e
 	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode credentials response: %w", errUnmarshal)
 	}
-	out := make([]credentialSummary, 0, len(payload.Files))
+	out := make([]accountSummary, 0, len(payload.Files))
 	for _, file := range payload.Files {
-		item := credentialSummary{
-			Name:     stringField(file, "name", "id"),
-			Provider: stringField(file, "provider", "type"),
-			Type:     stringField(file, "type"),
-			Status:   stringField(file, "status"),
-			Disabled: boolField(file, "disabled"),
-			PlanType: stringField(file, "plan_type"),
+		item := projectAccount(file)
+		if filter.Provider != "" && !strings.EqualFold(item.Provider, filter.Provider) {
+			continue
 		}
-		if expiry, ok := file["expired"].(string); ok {
-			item.Expired = expiry
+		if filter.Status != "" && !strings.EqualFold(item.Status, filter.Status) {
+			continue
+		}
+		if !filter.IncludeDisabled && item.Disabled {
+			continue
 		}
 		out = append(out, item)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Provider != out[j].Provider {
+			return out[i].Provider < out[j].Provider
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out, nil
+}
+
+func projectAccount(file map[string]any) accountSummary {
+	item := accountSummary{
+		Name:           stringField(file, "name", "id"),
+		Provider:       stringField(file, "provider", "type"),
+		Account:        stringField(file, "account"),
+		Email:          stringField(file, "email"),
+		AccountType:    stringField(file, "account_type"),
+		PlanType:       stringField(file, "plan_type"),
+		Label:          stringField(file, "label"),
+		Status:         stringField(file, "status"),
+		StatusMessage:  stringField(file, "status_message"),
+		Disabled:       boolField(file, "disabled"),
+		Unavailable:    boolField(file, "unavailable"),
+		RuntimeOnly:    boolField(file, "runtime_only"),
+		Note:           stringField(file, "note"),
+		Success:        intField(file, "success"),
+		Failed:         intField(file, "failed"),
+		CreatedAt:      stringField(file, "created_at"),
+		UpdatedAt:      stringField(file, "updated_at", "modtime"),
+		LastRefresh:    stringField(file, "last_refresh"),
+		NextRetryAfter: stringField(file, "next_retry_after"),
+		Priority:       intPtrField(file, "priority"),
+	}
+	// The host nests the ChatGPT plan inside the id_token claims; a flat
+	// plan_type only appears on uploads and older builds.
+	if item.PlanType == "" {
+		if idToken, ok := file["id_token"].(map[string]any); ok {
+			item.PlanType = stringField(idToken, "plan_type")
+		}
+	}
+	item.Usable = !item.Disabled && !item.Unavailable &&
+		!strings.EqualFold(item.Status, "disabled") &&
+		!strings.EqualFold(item.Status, "error")
+
+	if cooldowns, ok := file["cooldowns"].([]any); ok {
+		for _, entry := range cooldowns {
+			fields, okFields := entry.(map[string]any)
+			if !okFields {
+				continue
+			}
+			item.Cooldowns = append(item.Cooldowns, accountCooldown{
+				Scope:            stringField(fields, "scope"),
+				ModelKey:         stringField(fields, "model_key"),
+				Reason:           stringField(fields, "reason"),
+				RetryAt:          stringField(fields, "retry_at"),
+				RemainingSeconds: int64(intField(fields, "remaining_seconds")),
+			})
+		}
+	}
+
+	// SIWC fields are only emitted for codex accounts.
+	if _, present := file["siwc_bind_supported"]; present {
+		item.SIWC = &accountSIWC{
+			Supported: boolField(file, "siwc_bind_supported"),
+			Bound:     boolField(file, "siwc_bound"),
+			Status:    stringField(file, "siwc_status"),
+			Use:       boolField(file, "use_siwc"),
+		}
+	}
+	return item
+}
+
+// accountTotals is the aggregate an agent should read before paging through
+// individual accounts.
+type accountTotals struct {
+	Total       int            `json:"total"`
+	Usable      int            `json:"usable"`
+	Disabled    int            `json:"disabled"`
+	Unavailable int            `json:"unavailable"`
+	ByProvider  map[string]int `json:"by_provider"`
+	ByStatus    map[string]int `json:"by_status"`
+}
+
+func summarizeAccounts(items []accountSummary) accountTotals {
+	totals := accountTotals{
+		Total:      len(items),
+		ByProvider: map[string]int{},
+		ByStatus:   map[string]int{},
+	}
+	for _, item := range items {
+		if item.Usable {
+			totals.Usable++
+		}
+		if item.Disabled {
+			totals.Disabled++
+		}
+		if item.Unavailable {
+			totals.Unavailable++
+		}
+		provider := item.Provider
+		if provider == "" {
+			provider = "unknown"
+		}
+		totals.ByProvider[provider]++
+		status := item.Status
+		if status == "" {
+			status = "unknown"
+		}
+		totals.ByStatus[status]++
+	}
+	return totals
 }
 
 func stringField(payload map[string]any, names ...string) string {
@@ -268,6 +420,34 @@ func boolField(payload map[string]any, name string) bool {
 	default:
 		return false
 	}
+}
+
+func intField(payload map[string]any, name string) int {
+	switch value := payload[name].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	case json.Number:
+		parsed, errParse := value.Int64()
+		if errParse == nil {
+			return int(parsed)
+		}
+	case string:
+		parsed, errParse := strconv.Atoi(strings.TrimSpace(value))
+		if errParse == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func intPtrField(payload map[string]any, name string) *int {
+	if _, ok := payload[name]; !ok {
+		return nil
+	}
+	value := intField(payload, name)
+	return &value
 }
 
 // waitForCompletion long-polls the host's own OAuth session until it completes,

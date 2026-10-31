@@ -90,6 +90,29 @@ func toolDefinitions(cfg pluginConfig) []map[string]any {
 			"annotations": map[string]any{"readOnlyHint": true},
 		},
 		{
+			"name":        "list_accounts",
+			"description": "List the accounts this proxy can serve requests from, with per-account health: provider, email, plan, status, disabled/unavailable flags, cooldowns, request success/failure counts, and Codex SIWC binding state. Read totals first, then filter by provider or status. Never returns tokens. Use this to decide whether a provider still has a usable account before starting a new login.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"provider": map[string]any{
+						"type":        "string",
+						"description": "Only return accounts for this provider (case-insensitive).",
+					},
+					"status": map[string]any{
+						"type":        "string",
+						"description": "Only return accounts with this host status, e.g. active, disabled, error.",
+					},
+					"include_disabled": map[string]any{
+						"type":        "boolean",
+						"description": "Include disabled accounts. Defaults to true.",
+					},
+				},
+				"additionalProperties": false,
+			},
+			"annotations": map[string]any{"readOnlyHint": true},
+		},
+		{
 			"name":        "list_credentials",
 			"description": "List saved credentials (name, provider, status, plan, expiry). Never returns tokens.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},

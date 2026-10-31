@@ -38,7 +38,8 @@ of its own.
 | `oauth_login_submit` | Posts to `/v8/management/oauth/callback`. Accepts either `callback_url` (a full pasted redirect URL; `state` and `code` are extracted) or `state` + `code`. |
 | `oauth_login_cancel` | `DELETE /v8/management/oauth/session` so no credential is saved. |
 | `list_providers` | The advertised provider names plus the default. |
-| `list_credentials` | Saved credentials: name, provider, status, plan, expiry. **Never returns tokens.** |
+| `list_accounts` | Every account the proxy can serve from, with health: provider, email, plan, status, disabled/unavailable, cooldowns, success/failed counts, Codex SIWC binding, plus `totals` (usable/disabled/by_provider/by_status). Filters: `provider`, `status`, `include_disabled`. **Never returns tokens.** |
+| `list_credentials` | Deprecated flat list kept for older clients; same data as `list_accounts` minus health fields. |
 | `cpa_status` | Plugin/host schema versions, loopback base URL, where the management credential came from. First thing to call when authorization fails. |
 
 A failed login (`status=error`) is returned with `isError: true` as well as the
@@ -133,6 +134,11 @@ published `.so` loaded, not against mocks.
 | `oauth_login_cancel` (xai device) | `cancelled: true`, later `wait` → `unknown or expired state` |
 | `list_providers` | 8 providers; `anthropic`/`grok`/`openai` correctly absent (host 404s them) |
 | `list_credentials` on an empty instance | `count: 0` |
+| `list_accounts` with a real codex auth file | `count: 1`, `totals.by_provider.codex = 1`, `usable: true`, `priority: 7`, `siwc: {supported: true, bound: false, status: "off"}` |
+| `list_accounts` filtered by an absent provider | `count: 0` + "Call oauth_login_start to add one" |
+| `list_accounts` after `PATCH /credentials/status {disabled:true}` | `disabled: true`, `usable: false`, `totals.by_status.disabled = 1` |
+| `list_accounts {include_disabled:false}` | the disabled account is filtered out → `count: 0` |
+| `list_accounts {status:"disabled"}` | returns exactly the disabled account |
 | Console resource | HTTP 200 `text/html`, `navigator.modelContext` registration present, provider list injected |
 | `GET /v0/management/mcp` | HTTP 405 + `Allow: POST` (no standalone SSE stream) |
 
@@ -156,10 +162,12 @@ unknown methods), tool-error propagation, and loose YAML decoding.
   the name through, so an unlisted provider still works if the host knows it.
 - **Device-flow codes are not scraped.** For `xai`/`kimi`/`meta` the user code is
   inside the returned URL; the plugin does not parse it into a separate field.
-- **`list_credentials` is a projection.** Only name/provider/status/plan/expiry
-  are exposed. Tokens stay in the host auth dir.
+- **`list_accounts` is a projection.** Only health and routing metadata is
+  exposed: no tokens, no `id_token` claims beyond the plan type, no file paths.
+  Cooldowns come from the host's `cooldowns` array; when the host has no home
+  store it returns `null` and the field is simply absent.
 - **No refresh or quota tooling.** Those are separate host endpoints; this plugin
-  deliberately stays on the login path.
+  deliberately stays on the login path and read-only account listing.
 
 ## Build
 

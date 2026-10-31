@@ -63,6 +63,13 @@ const consoleTemplate = `<!doctype html>
     <button id="submit">Submit callback</button>
   </div>
   <p id="hint" class="mut">No login in progress.</p>
+
+  <div class="row">
+    <button id="accounts">List accounts</button>
+    <span id="totals" class="mut"></span>
+  </div>
+  <div id="accountsTable"></div>
+
   <pre id="log"></pre>
 </main>
 <script>
@@ -158,6 +165,68 @@ const consoleTemplate = `<!doctype html>
   var keyInput = document.getElementById("key");
   if (storedKey()) { keyInput.placeholder = "Management key saved (type to replace)"; }
 
+  function renderAccounts(out) {
+    var host = document.getElementById("accountsTable");
+    var totalsEl = document.getElementById("totals");
+    host.textContent = "";
+    var accounts = (out && out.accounts) || [];
+    var totals = (out && out.totals) || {};
+    var parts = [];
+    Object.keys(totals.by_provider || {}).sort().forEach(function (name) {
+      parts.push(name + " " + totals.by_provider[name]);
+    });
+    totalsEl.textContent = (totals.total || 0) + " accounts, " + (totals.usable || 0) + " usable" + (parts.length ? " — " + parts.join(", ") : "");
+    if (!accounts.length) {
+      host.textContent = (out && out.message) || "No accounts.";
+      return;
+    }
+    var table = document.createElement("table");
+    table.style.cssText = "width:100%; border-collapse:collapse; font-size:13px;";
+    var head = document.createElement("tr");
+    ["provider", "account", "plan", "status", "prio", "ok/fail", "cooldown"].forEach(function (label) {
+      var th = document.createElement("th");
+      th.textContent = label;
+      th.style.cssText = "text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); color:var(--mut); font-weight:600;";
+      head.appendChild(th);
+    });
+    table.appendChild(head);
+    accounts.forEach(function (item) {
+      var tr = document.createElement("tr");
+      var cooldown = (item.cooldowns || []).map(function (entry) {
+        return (entry.model_key || entry.scope) + " " + entry.remaining_seconds + "s";
+      }).join(", ");
+      var cells = [
+        item.provider || "?",
+        item.account || item.email || item.name,
+        item.plan_type || "—",
+        item.status || "?",
+        item.priority === undefined || item.priority === null ? "—" : String(item.priority),
+        (item.success || 0) + "/" + (item.failed || 0),
+        cooldown || "—"
+      ];
+      cells.forEach(function (value, index) {
+        var td = document.createElement("td");
+        td.textContent = value;
+        td.style.cssText = "padding:6px 8px; border-bottom:1px solid var(--line);";
+        if (index === 3) { td.className = item.usable ? "ok" : "err"; }
+        tr.appendChild(td);
+      });
+      table.appendChild(tr);
+    });
+    host.appendChild(table);
+  }
+
+  function listAccounts() {
+    return callTool("list_accounts", {}).then(function (out) {
+      renderAccounts(out);
+      return out;
+    });
+  }
+
+  document.getElementById("accounts").addEventListener("click", function () {
+    listAccounts().then(function (out) { log("list_accounts", out.totals); }).catch(function (err) { setHint(err.message, "err"); });
+  });
+
   document.getElementById("start").addEventListener("click", function () {
     start(selectEl.value).then(function (out) { log("oauth_login_start", out); }).catch(function (err) { setHint(err.message, "err"); log("error", { message: err.message }); });
   });
@@ -199,10 +268,19 @@ const consoleTemplate = `<!doctype html>
           description: "Submit the redirect URL (or code) when the browser cannot reach the provider callback port.",
           inputSchema: { type: "object", properties: { callback_url: { type: "string" } }, required: ["callback_url"] },
           execute: function (args) { return submit((args && args.callback_url) || "").then(function (out) { return { content: [{ type: "text", text: JSON.stringify(out) }] }; }); }
+        },
+        {
+          name: "cpa_list_accounts",
+          description: "List CLIProxyAPI accounts with health, plan, cooldowns and totals.",
+          inputSchema: { type: "object", properties: { provider: { type: "string" } } },
+          execute: function (args) {
+            return callTool("list_accounts", { provider: (args && args.provider) || undefined })
+              .then(function (out) { return { content: [{ type: "text", text: JSON.stringify(out) }] }; });
+          }
         }
       ]
     });
-    log("webmcp", { registered: 3 });
+    log("webmcp", { registered: 4 });
   } else {
     log("webmcp", { registered: 0, reason: "navigator.modelContext unavailable; buttons still work" });
   }
