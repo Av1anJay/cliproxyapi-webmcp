@@ -162,6 +162,10 @@ unknown methods), tool-error propagation, and loose YAML decoding.
   the name through, so an unlisted provider still works if the host knows it.
 - **Device-flow codes are not scraped.** For `xai`/`kimi`/`meta` the user code is
   inside the returned URL; the plugin does not parse it into a separate field.
+- **`plan_type` needs a real id_token.** The host only derives the ChatGPT plan
+  from `id_token` claims, so accounts whose token cannot be parsed (hand-made
+  fixtures, refreshed-and-rotated creds) report no plan. Everything else in
+  `list_accounts` comes straight off the credential entry.
 - **`list_accounts` is a projection.** Only health and routing metadata is
   exposed: no tokens, no `id_token` claims beyond the plan type, no file paths.
   Cooldowns come from the host's `cooldowns` array; when the host has no home

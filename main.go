@@ -68,7 +68,7 @@ import (
 
 const (
 	pluginID      = "webmcp"
-	pluginVersion = "0.1.0"
+	pluginVersion = "0.2.1"
 	// minSchemaVersion gates on management routes plus raw management JSON.
 	minSchemaVersion = 6
 )
